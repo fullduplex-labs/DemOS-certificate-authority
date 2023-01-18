@@ -51,9 +51,11 @@ class CloudFormationResponse:
       Data = data
     )
 
-    if status == 'FAILED' and reason is None:
-      cloudwatch = self.context['log_stream_name']
-      body['Reason'] = f'Unspecified error, check CloudWatch Logs: {cloudwatch}'
+    if status == 'FAILED':
+      if reason is None:
+        cloudwatch = self.context['log_stream_name']
+        reason = f'Unspecified error, check CloudWatch Logs: {cloudwatch}'
+      body['Reason'] = reason    
 
     body = json.dumps(body)
 

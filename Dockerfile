@@ -28,9 +28,13 @@ apt-get update
 apt-get install -y --no-install-recommends python3 python3-pip
 rm -rf /var/lib/apt/lists/*
 #
-# Install AWS Lambda Runtime Interface Client
 mkdir -p /app
-pip3 install --target /app awslambdaric boto3
+#
+# Install AWS Lambda Runtime Interface Client
+pip install --target /app awslambdaric
+#
+# Install Additional Dependencies
+pip install --target /app boto3 cryptography
 EOF
 
 ARG LAMBDA_RIE

@@ -22,11 +22,6 @@ Logger = logging.getLogger()
 LogLevel = os.environ.get('LOG_LEVEL', 'INFO')
 Logger.setLevel(logging.DEBUG if LogLevel == 'DEBUG' else logging.INFO)
 
-Env = dict(
-  Region = os.environ['AWS_REGION'],
-  KeyAlias = os.environ.get('KeyAlias')
-)
-
 def handler(event, context):
 
   Logger.debug(json.dumps(event))
@@ -34,17 +29,23 @@ def handler(event, context):
 
   try:
     cfn_response = CloudFormationResponse(event, context)
+    ca = CertificateAuthority(event)
 
     if event['RequestType'] == 'Create':
-      Logger.debug('CREATE')
+      data = ca.get_certificates()
+      Logger.debug(data)
+      cfn_response.send(status='SUCCESS', data=data)
 
     elif event['RequestType'] == 'Update':
       Logger.debug('UPDATE')
 
     elif event['RequestType'] == 'Delete':
-      Logger.debug('DELETE')
+      ca.destroy()
+      cfn_response.send(status='SUCCESS')
 
-    cfn_response.send(status='SUCCESS')
+    else:
+      Logger.error(event)
+      raise Exception(f'Unexpected RequestType: {event["RequestType"]}')
 
   except Exception as e:
     Logger.error(e)
