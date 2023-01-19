@@ -22,30 +22,37 @@ Logger = logging.getLogger()
 LogLevel = os.environ.get('LOG_LEVEL', 'INFO')
 Logger.setLevel(logging.DEBUG if LogLevel == 'DEBUG' else logging.INFO)
 
+SupportedResourceTypes = [
+  'Custom::CertificateAuthority',
+  'Custom::CertificateInternal',
+  'Custom::CertificateExternal',
+  'Custom::CertificatePublic',
+]
+
 def handler(event, context):
-
-  Logger.debug(json.dumps(event))
-  Logger.debug(context)
-
   try:
+
+    if event.get('ResourceType') not in SupportedResourceTypes:
+      raise Exception(f'Unsupported ResourceType: {event.get("ResourceType")}')
+
     cfn_response = CloudFormationResponse(event, context)
     ca = CertificateAuthority(event)
+    response_data = None
 
     if event['RequestType'] == 'Create':
-      data = ca.get_certificates()
-      Logger.debug(data)
-      cfn_response.send(status='SUCCESS', data=data)
+      response_data = ca.get_certificate()
+      Logger.debug(json.dumps(response_data))
 
     elif event['RequestType'] == 'Update':
       Logger.debug('UPDATE')
 
     elif event['RequestType'] == 'Delete':
       ca.destroy()
-      cfn_response.send(status='SUCCESS')
 
     else:
-      Logger.error(event)
-      raise Exception(f'Unexpected RequestType: {event["RequestType"]}')
+      raise Exception(f'Unsupported RequestType: {event["RequestType"]}')
+
+    cfn_response.send(status='SUCCESS', data=response_data)
 
   except Exception as e:
     Logger.error(e)

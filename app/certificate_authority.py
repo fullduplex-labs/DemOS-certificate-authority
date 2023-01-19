@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import os, logging, boto3, datetime, json
+import os, logging, boto3, datetime
 
 from cryptography import x509
 from cryptography.x509.oid import NameOID
@@ -34,34 +34,35 @@ AwsSsm = boto3.client('ssm')
 class CertificateAuthority:
 
   def __init__(self, event):
+    self._ResourceType = event['ResourceType'].split('::Certificate')[1]
     self._Path = event['ResourceProperties']['Path']
-    self._PrivateDomain = event['ResourceProperties']['PrivateDomain']
-    self._PublicDomain = event['ResourceProperties']['PublicDomain']
-    self._Issuer = event['ResourceProperties']['Issuer']
+
+    self._Issuer = event['ResourceProperties'].get('Issuer')
+    self._PrivateDomain = event['ResourceProperties'].get('PrivateDomain')
+    self._PublicDomain = event['ResourceProperties'].get('PublicDomain')
 
     self._certificates = dict(
-      CA = dict(Key=None, Cert=None),
+      Authority = dict(Key=None, Cert=None),
       Internal = dict(Key=None, Cert=None),
-      External = dict(Key=None, Cert=None),
-      Public = None
+      External = dict(Key=None, Cert=None)
+      # Public = None
     )
 
     self._exports = {}
 
-  def get_certificates(self):
-    if self.__get_exports():
-      Logger.debug('Exports Found!')
-    else:
-      Logger.debug('No Exports Found!')
+  def get_certificate(self):
+    if not self.__get_exports():
       self.__make_certificates()
       self.__export_certificates()
       self.__save_exports()
 
-    return self.__sanitize_exports()
+    return self._exports.get(self._ResourceType)
 
   def destroy(self):
+    if self._ResourceType != 'Authority':
+      return
+
     if self.__get_exports():
-      Logger.debug('Exports Found!')
       self.__delete_exports()
 
   def __get_exports(self):
@@ -75,14 +76,18 @@ class CertificateAuthority:
       return False
 
     for parameter in response['Parameters']:
-      name = parameter['Name'].split('/')[-1]
-      type = parameter['Name'].split('/')[-2]
-      self._exports[type] = {name: parameter['Value']}
+      cert = parameter['Name'].split('/')[-2]
+      export = parameter['Name'].split('/')[-1]
+
+      if self._exports.get(cert) is None:
+        self._exports[cert] = dict()
+
+      self._exports[cert][export] = parameter['Value']
 
     return True
 
   def __make_certificates(self):
-    self._certificates['CA'] = self.__make_certificate_authority()
+    self._certificates['Authority'] = self.__make_certificate_authority()
 
     self._certificates['Internal'] = self.__make_certificate(
       domains = [self._PrivateDomain, f'*.{self._PrivateDomain}']
@@ -135,7 +140,7 @@ class CertificateAuthority:
         x509.NameAttribute(NameOID.COMMON_NAME, domains.pop(0))
       ])
     ).issuer_name(
-      self._certificates['CA']['Cert'].issuer
+      self._certificates['Authority']['Cert'].issuer
     ).public_key(
       private_key.public_key()
     ).serial_number(
@@ -153,7 +158,7 @@ class CertificateAuthority:
       certificate.add_extension(subjectAltNames, critical=False)
 
     certificate = certificate.sign(
-      self._certificates['CA']['Key'],
+      self._certificates['Authority']['Key'],
       hashes.SHA256(),
       default_backend()
     )
@@ -162,20 +167,16 @@ class CertificateAuthority:
 
   def __export_certificates(self):
     for cert in self._certificates.keys():
-      if not self._certificates[cert]: continue
-      self._exports[cert] = self.__export_certificate(self._certificates[cert])
-
-  def __export_certificate(self, certificate={}):
-    return dict(
-      Key = certificate['Key'].private_bytes(
-        encoding = serialization.Encoding.PEM,
-        format = serialization.PrivateFormat.TraditionalOpenSSL,
-        encryption_algorithm = serialization.NoEncryption()
-      ).decode('utf-8'),
-      Cert = certificate['Cert'].public_bytes(
-        encoding = serialization.Encoding.PEM
-      ).decode('utf-8')
-    )
+      self._exports[cert] = dict(
+        Key = self._certificates[cert]['Key'].private_bytes(
+          encoding = serialization.Encoding.PEM,
+          format = serialization.PrivateFormat.TraditionalOpenSSL,
+          encryption_algorithm = serialization.NoEncryption()
+        ).decode('utf-8'),
+        Cert = self._certificates[cert]['Cert'].public_bytes(
+          encoding = serialization.Encoding.PEM
+        ).decode('utf-8')
+      )
 
   def __save_exports(self):
     for cert in self._exports.keys():
@@ -187,16 +188,6 @@ class CertificateAuthority:
           KeyId = Env['KeyAlias'],
           Overwrite = True
         )
-
-  def __sanitize_exports(self):
-    sanitized = {}
-    for cert in self._exports.keys():
-      for export in self._exports[cert].keys():
-        if cert == 'CA' and export == 'Key': continue
-        label = f'{cert.title()}{export.title()}'
-        sanitized[label] = self._exports[cert][export]
-
-    return sanitized
 
   def __delete_exports(self):
     parameters = []
