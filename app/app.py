@@ -19,18 +19,21 @@ from aws_tools import CloudFormationResponse
 from certificate_authority import CertificateAuthority
 
 Logger = logging.getLogger()
-LogLevel = os.environ.get('LOG_LEVEL', 'INFO')
-Logger.setLevel(logging.DEBUG if LogLevel == 'DEBUG' else logging.INFO)
+if os.environ.get('LOG_LEVEL', 'INFO') == 'DEBUG':
+  Logger.setLevel(logging.DEBUG)
+else:
+  logging.disable(logging.DEBUG)
 
 SupportedResourceTypes = [
   'Custom::CertificateAuthority',
   'Custom::CertificateInternal',
   'Custom::CertificateExternal',
-  'Custom::CertificatePublic',
+  'Custom::CertificatePublic'
 ]
 
 def handler(event, context):
   try:
+    Logger.info(json.dumps(event))
 
     if event.get('ResourceType') not in SupportedResourceTypes:
       raise Exception(f'Unsupported ResourceType: {event.get("ResourceType")}')
@@ -39,16 +42,10 @@ def handler(event, context):
     ca = CertificateAuthority(event)
     response_data = None
 
-    if event['RequestType'] == 'Create':
+    if event['RequestType'] in ['Create', 'Update']:
       response_data = ca.get_certificate()
-      Logger.debug(json.dumps(response_data))
-
-    elif event['RequestType'] == 'Update':
-      Logger.debug('UPDATE')
-
     elif event['RequestType'] == 'Delete':
       ca.destroy()
-
     else:
       raise Exception(f'Unsupported RequestType: {event["RequestType"]}')
 

@@ -34,7 +34,7 @@ mkdir -p /app
 pip install --target /app awslambdaric
 #
 # Install Additional Dependencies
-pip install --target /app boto3 cryptography
+pip install --target /app boto3 cryptography certbot-dns-route53
 EOF
 
 ARG LAMBDA_RIE

@@ -21,9 +21,13 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+import certbot.main, shutil
+
 Logger = logging.getLogger()
-LogLevel = os.environ.get('LOG_LEVEL', 'INFO')
-Logger.setLevel(logging.DEBUG if LogLevel == 'DEBUG' else logging.INFO)
+if os.environ.get('LOG_LEVEL', 'INFO') == 'DEBUG':
+  Logger.setLevel(logging.DEBUG)
+else: # Workaround: certbot aggro logs
+  logging.disable(logging.DEBUG)
 
 Env = dict(
   KeyAlias = os.environ.get('KeyAlias')
@@ -44,8 +48,8 @@ class CertificateAuthority:
     self._certificates = dict(
       Authority = dict(Key=None, Cert=None),
       Internal = dict(Key=None, Cert=None),
-      External = dict(Key=None, Cert=None)
-      # Public = None
+      External = dict(Key=None, Cert=None),
+      Public = dict(Key=None, Cert=None, Chain=None)
     )
 
     self._exports = {}
@@ -56,7 +60,7 @@ class CertificateAuthority:
       self.__export_certificates()
       self.__save_exports()
 
-    return self._exports.get(self._ResourceType)
+    return self.__export()
 
   def destroy(self):
     if self._ResourceType != 'Authority':
@@ -89,11 +93,15 @@ class CertificateAuthority:
   def __make_certificates(self):
     self._certificates['Authority'] = self.__make_certificate_authority()
 
-    self._certificates['Internal'] = self.__make_certificate(
+    self._certificates['Internal'] = self.__make_certificate_private(
       domains = [self._PrivateDomain, f'*.{self._PrivateDomain}']
     )
 
-    self._certificates['External'] = self.__make_certificate(
+    self._certificates['External'] = self.__make_certificate_private(
+      domains = [self._PublicDomain, f'*.{self._PublicDomain}']
+    )
+
+    self._certificates['Public'] = self.__make_certificate_public(
       domains = [self._PublicDomain, f'*.{self._PublicDomain}']
     )
 
@@ -128,7 +136,7 @@ class CertificateAuthority:
 
     return dict(Key=private_key, Cert=certificate)
 
-  def __make_certificate(self, domains=[]):
+  def __make_certificate_private(self, domains=[]):
     private_key = rsa.generate_private_key(
       public_exponent = 65537,
       key_size = 2048,
@@ -165,18 +173,44 @@ class CertificateAuthority:
 
     return dict(Key=private_key, Cert=certificate)
 
+  def __make_certificate_public(self, domains=[]):
+    folder = "/tmp/certbot"
+
+    certbot.main.main(['certonly', '--dns-route53', '-q', '-n', '--agree-tos',
+      '-d', f'{",".join(domains)}',
+      '--email', f'alerts@{domains[0]}',
+      '--dns-route53-propagation-seconds', '30',
+      '--config-dir', folder,
+      '--work-dir', folder,
+      '--logs-dir', folder
+    ])
+
+    path = f'{folder}/live/{domains[0]}'
+
+    with open(f'{path}/privkey.pem', 'r') as file: private_key = file.read()
+    with open(f'{path}/cert.pem', 'r') as file: certificate = file.read()
+    with open(f'{path}/chain.pem', 'r') as file: chain = file.read()
+
+    shutil.rmtree(path)
+
+    return dict(Key=private_key, Cert=certificate, Chain=chain)
+
   def __export_certificates(self):
     for cert in self._certificates.keys():
-      self._exports[cert] = dict(
-        Key = self._certificates[cert]['Key'].private_bytes(
-          encoding = serialization.Encoding.PEM,
-          format = serialization.PrivateFormat.TraditionalOpenSSL,
-          encryption_algorithm = serialization.NoEncryption()
-        ).decode('utf-8'),
-        Cert = self._certificates[cert]['Cert'].public_bytes(
-          encoding = serialization.Encoding.PEM
-        ).decode('utf-8')
-      )
+      if cert == 'Public':
+        Logger.info(type(self._certificates[cert]['Cert']))
+        self._exports[cert] = self._certificates[cert]
+      else:
+        self._exports[cert] = dict(
+          Key = self._certificates[cert]['Key'].private_bytes(
+            encoding = serialization.Encoding.PEM,
+            format = serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm = serialization.NoEncryption()
+          ).decode('utf-8'),
+          Cert = self._certificates[cert]['Cert'].public_bytes(
+            encoding = serialization.Encoding.PEM
+          ).decode('utf-8')
+        )
 
   def __save_exports(self):
     for cert in self._exports.keys():
@@ -196,3 +230,18 @@ class CertificateAuthority:
         parameters.append(f'{self._Path}/{cert}/{export}')
 
     AwsSsm.delete_parameters(Names=parameters)
+
+  def __export(self):
+    if self._ResourceType == 'Authority':
+      return dict(
+        Cert = self._exports['Authority']['Cert']
+      )
+
+    elif self._ResourceType == 'Public':
+      return dict(
+        Key = self._exports['Public']['Key'],
+        Cert = self._exports['Public']['Cert']
+      )
+
+    else:
+      return self._exports.get(self._ResourceType)
