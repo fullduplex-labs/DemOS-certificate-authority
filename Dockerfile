@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.3-labs
+# syntax=docker/dockerfile:1.5-labs
 #
 # Copyright 2023 Full Duplex Media, LLC
 
