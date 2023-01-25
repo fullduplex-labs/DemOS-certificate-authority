@@ -12,7 +12,7 @@ variable "NO_CACHE" {
 
 target "default" {
   dockerfile = "Dockerfile"
-  tags = ["docker.io/fullduplexlabs/aws-openvpn-gateway:${TAG}"]
+  tags = ["docker.io/fullduplexlabs/aws-serverless-private-ca:${TAG}"]
   platforms = "${PLATFORMS}"
   no-cache = "${NO_CACHE}"
 }
