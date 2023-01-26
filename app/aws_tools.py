@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import os, logging, urllib3, json, boto3
+import os, logging, urllib3, json
 
 Logger = logging.getLogger()
 LogLevel = os.environ.get('LOG_LEVEL', 'INFO')
