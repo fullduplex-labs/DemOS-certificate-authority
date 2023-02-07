@@ -198,12 +198,12 @@ class CertificateAuthority:
 
   def __make_certificate_dhparams(self, name='DiffieHellman'):
     Logger.info('Generating Diffie-Hellman Parameters')
-    
+
     self._certificates[name] = dict(
       Params = dh.generate_parameters(
         generator = 2,
-        key_size = 2048,
-        backend=default_backend()
+        key_size = 1024,
+        backend = default_backend()
       )
     )
 
