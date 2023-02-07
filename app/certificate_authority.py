@@ -19,14 +19,15 @@ from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import rsa, dh
 
 import certbot.main, shutil
 
 Logger = logging.getLogger()
 if os.environ.get('LOG_LEVEL', 'INFO') == 'DEBUG':
   Logger.setLevel(logging.DEBUG)
-else: # Workaround: certbot aggro logs
+else: # Workaround: certbot aggro DEBUG logs
+  Logger.setLevel(logging.INFO)
   logging.disable(logging.DEBUG)
 
 Env = dict(
@@ -51,10 +52,10 @@ class CertificateAuthority:
   def get_certificate(self):
     self.__get_exports()
 
-    if self._exports.get(self._ResourceType) is not None:
+    if self._exports.get(self._ResourceType):
       return self.__export()
 
-    if self._ResourceType != 'Public':
+    if self._ResourceType in ['Authority', 'Internal', 'External']:
       self.__make_certificate_authority()
 
       self.__make_certificate_private(
@@ -67,10 +68,16 @@ class CertificateAuthority:
         domains = [self._PublicDomain, f'*.{self._PublicDomain}']
       )
 
-    else:
+    elif self._ResourceType == 'DiffieHellman':
+      self.__make_certificate_dhparams()
+
+    elif self._ResourceType == 'Public':
       self.__make_certificate_public(
         domains = [self._PublicDomain, f'*.{self._PublicDomain}']
       )
+
+    else:
+      raise Exception(f'Unsupported ResourceType: {self._ResourceType}')
 
     return self.__export()
 
@@ -189,6 +196,20 @@ class CertificateAuthority:
     self.__export_certificate(name)
     self.__save_export(name)
 
+  def __make_certificate_dhparams(self, name='DiffieHellman'):
+    Logger.info('Generating Diffie-Hellman Parameters')
+    
+    self._certificates[name] = dict(
+      Params = dh.generate_parameters(
+        generator = 2,
+        key_size = 2048,
+        backend=default_backend()
+      )
+    )
+
+    self.__export_certificate(name)
+    self.__save_export(name)
+
   def __make_certificate_public(self, name='Public', domains=[]):
     Logger.info(f'Generating public certificate with domains:{domains}')
 
@@ -221,19 +242,30 @@ class CertificateAuthority:
     self.__save_export(name)
 
   def __export_certificate(self, name):
-    if name == 'Public':
-      self._exports[name] = self._certificates[name]
-    else:
-      self._exports[name] = dict(
-        Key = self._certificates[name]['Key'].private_bytes(
-          encoding = serialization.Encoding.PEM,
-          format = serialization.PrivateFormat.TraditionalOpenSSL,
-          encryption_algorithm = serialization.NoEncryption()
-        ).decode('utf-8'),
-        Cert = self._certificates[name]['Cert'].public_bytes(
-          encoding = serialization.Encoding.PEM
-        ).decode('utf-8')
-      )
+    certificate = self._certificates[name]
+    export = {}
+
+    if name in ['Authority', 'Internal', 'External']:
+      export['Key'] = certificate['Key'].private_bytes(
+        encoding = serialization.Encoding.PEM,
+        format = serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm = serialization.NoEncryption()
+      ).decode('utf-8')
+
+      export['Cert'] = certificate['Cert'].public_bytes(
+        encoding = serialization.Encoding.PEM
+      ).decode('utf-8')
+
+    elif name == 'DiffieHellman':
+      export['Params'] = certificate['Params'].parameter_bytes(
+        encoding = serialization.Encoding.PEM,
+        format = serialization.ParameterFormat.PKCS3
+      ).decode('utf-8')
+
+    elif name == 'Public':
+      export = certificate
+
+    self._exports[name] = export
 
   def __save_export(self, name):
     for export in self._exports[name].keys():

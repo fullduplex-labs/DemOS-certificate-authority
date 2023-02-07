@@ -28,6 +28,7 @@ SupportedResourceTypes = [
   'Custom::CertificateAuthority',
   'Custom::CertificateInternal',
   'Custom::CertificateExternal',
+  'Custom::CertificateDiffieHellman',
   'Custom::CertificatePublic'
 ]
 
@@ -38,19 +39,19 @@ def handler(event, context):
     if event.get('ResourceType') not in SupportedResourceTypes:
       raise Exception(f'Unsupported ResourceType: {event.get("ResourceType")}')
 
-    cfn_response = CloudFormationResponse(event, context)
+    cfnResponse = CloudFormationResponse(event, context)
     ca = CertificateAuthority(event)
-    response_data = None
+    responseData = None
 
     if event['RequestType'] in ['Create', 'Update']:
-      response_data = ca.get_certificate()
+      responseData = ca.get_certificate()
     elif event['RequestType'] == 'Delete':
       ca.destroy()
     else:
       raise Exception(f'Unsupported RequestType: {event["RequestType"]}')
 
-    cfn_response.send(status='SUCCESS', data=response_data)
+    cfnResponse.send(status='SUCCESS', data=responseData)
 
   except Exception as e:
     Logger.error(e)
-    cfn_response.send(status='FAILED', reason=str(e))
+    cfnResponse.send(status='FAILED', reason=str(e))
