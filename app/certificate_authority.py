@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import os, logging, boto3, datetime
+import os, logging, boto3, datetime, shutil
 
 from cryptography import x509
 from cryptography.x509.oid import NameOID
@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import rsa, dh
 
-import certbot.main, shutil
+import certbot.main
 
 Logger = logging.getLogger()
 if os.environ.get('LOG_LEVEL', 'INFO') == 'DEBUG':
@@ -31,7 +31,12 @@ else: # Workaround: certbot aggro DEBUG logs
   logging.disable(logging.DEBUG)
 
 Env = dict(
-  KeyAlias = os.environ.get('KeyAlias')
+  Issuer = os.environ['Issuer'],
+  PrivateDomain = os.environ['PrivateDomain'],
+  PublicDomain = os.environ['PublicDomain'],
+  KeyAlias = os.environ['KeyAlias'],
+  CertbotEmail = os.environ['CertbotEmail'],
+  CertbotStaging = os.environ['CertbotStaging']
 )
 
 AwsSsm = boto3.client('ssm')
@@ -40,53 +45,42 @@ class CertificateAuthority:
 
   def __init__(self, event):
     self._ResourceType = event['ResourceType'].split('::Certificate')[1]
+    self._Name = event['ResourceProperties']['Name']
     self._Path = event['ResourceProperties']['Path']
 
-    self._Issuer = event['ResourceProperties'].get('Issuer')
-    self._PrivateDomain = event['ResourceProperties'].get('PrivateDomain')
-    self._PublicDomain = event['ResourceProperties'].get('PublicDomain')
+    self._publicDomain = f'{self._Name}.{Env["PublicDomain"]}'
 
     self._certificates = {}
     self._exports = {}
 
-  def get_certificate(self):
     self.__get_exports()
 
+  def get_certificate(self):
     if self._exports.get(self._ResourceType):
       return self.__export()
 
-    if self._ResourceType in ['Authority', 'Internal', 'External']:
+    if self._ResourceType == 'Authority':
       self.__make_certificate_authority()
-
-      self.__make_certificate_private(
-        name = 'Internal',
-        domains = [self._PrivateDomain, f'*.{self._PrivateDomain}']
-      )
-
-      self.__make_certificate_private(
-        name = 'External',
-        domains = [self._PublicDomain, f'*.{self._PublicDomain}']
-      )
+      self.__make_certificate_private(name = 'Internal')
+      self.__make_certificate_private(name = 'External')
 
     elif self._ResourceType == 'DiffieHellman':
       self.__make_certificate_dhparams()
 
     elif self._ResourceType == 'Public':
-      self.__make_certificate_public(
-        domains = [self._PublicDomain, f'*.{self._PublicDomain}']
-      )
+      self.__make_certificate_public()
 
     else:
-      raise Exception(f'Unsupported ResourceType: {self._ResourceType}')
+      raise Exception(f'Missing certificate: {self._ResourceType}')
 
     return self.__export()
 
   def destroy(self):
-    if self._ResourceType != 'Authority':
-      return
-
-    if self.__get_exports():
+    if self._ResourceType == 'Authority':
       self.__delete_exports()
+
+    elif self._ResourceType == 'Public':
+      self.__revoke_certificate_public()
 
   def __get_exports(self):
     response = AwsSsm.get_parameters_by_path(
@@ -99,9 +93,20 @@ class CertificateAuthority:
       Logger.info(f'No exported certificates were found')
       return False
 
-    Logger.info(f'Found ({len(response["Parameters"])}) exported certificates')
+    parameters = response['Parameters']
 
-    for parameter in response['Parameters']:
+    while response.get('NextToken'):
+      response = AwsSsm.get_parameters_by_path(
+        Path = self._Path,
+        Recursive = True,
+        WithDecryption = True,
+        NextToken = response['NextToken']
+      )
+      parameters += response['Parameters']
+
+    Logger.info(f'Found ({len(parameters)}) exported certificates')
+
+    for parameter in parameters:
       cert = parameter['Name'].split('/')[-2]
       export = parameter['Name'].split('/')[-1]
 
@@ -122,8 +127,8 @@ class CertificateAuthority:
     )
 
     subject = issuer = x509.Name([
-      x509.NameAttribute(NameOID.ORGANIZATION_NAME, self._Issuer),
-      x509.NameAttribute(NameOID.COMMON_NAME, self._PublicDomain)
+      x509.NameAttribute(NameOID.ORGANIZATION_NAME, Env['Issuer']),
+      x509.NameAttribute(NameOID.COMMON_NAME, self._publicDomain)
     ])
 
     certificate = x509.CertificateBuilder().subject_name(
@@ -151,7 +156,12 @@ class CertificateAuthority:
     self.__export_certificate(name)
     self.__save_export(name)
 
-  def __make_certificate_private(self, name, domains=[]):
+  def __make_certificate_private(self, name):
+    if name == 'External':
+      domains = [self._publicDomain, f'*.{self._publicDomain}']
+    else:
+      domains = [Env['PrivateDomain'], f'*.{Env["PrivateDomain"]}']
+
     Logger.info(f'Generating private cert:[{name}] with domains:{domains}')
 
     private_key = rsa.generate_private_key(
@@ -210,62 +220,119 @@ class CertificateAuthority:
     self.__export_certificate(name)
     self.__save_export(name)
 
-  def __make_certificate_public(self, name='Public', domains=[]):
+  def __make_certificate_public(self, name='Public'):
+    domains = [
+      self._publicDomain,
+      f'*.{self._publicDomain}'
+    ]
+
     Logger.info(f'Generating public certificate with domains:{domains}')
 
     folder = "/tmp/certbot"
 
-    certbot.main.main(['certonly', '--dns-route53', '-q', '-n', '--agree-tos',
+    arguments = [
+      'certonly',
+      '--dns-route53',
+      '-q',
+      '-n',
+      '--agree-tos',
       '-d', f'{",".join(domains)}',
-      '--email', f'alerts@{domains[0]}',
+      '--email', Env['CertbotEmail'],
       '--dns-route53-propagation-seconds', '30',
       '--config-dir', folder,
       '--work-dir', folder,
       '--logs-dir', folder
-    ])
+    ]
+
+    if Env['CertbotStaging']:
+      arguments.append('--test-cert')
+
+    certbot.main.main(arguments)
 
     path = f'{folder}/live/{domains[0]}'
+    with open(f'{path}/privkey.pem', 'r') as f: private_key = f.read()
+    with open(f'{path}/cert.pem', 'r') as f: certificate = f.read()
+    with open(f'{path}/chain.pem', 'r') as f: chain = f.read()
 
-    with open(f'{path}/privkey.pem', 'r') as file: private_key = file.read()
-    with open(f'{path}/cert.pem', 'r') as file: certificate = file.read()
-    with open(f'{path}/chain.pem', 'r') as file: chain = file.read()
+    path = f'{folder}/renewal'
+    with open(f'{path}/{domains[0]}.conf', 'r') as f: conf = f.read()
 
-    shutil.rmtree(path)
+    shutil.rmtree(folder)
 
     self._certificates[name] = dict(
       Key = private_key,
       Cert = certificate,
-      Chain = chain
+      Chain = chain,
+      Conf = conf
     )
 
     self.__export_certificate(name)
     self.__save_export(name)
 
+  def __revoke_certificate_public(self, name='Public'):
+    domain = self._publicDomain
+    Logger.info(f'Revoking public certificate for domain:{domain}')
+
+    folder = "/tmp/certbot"
+
+    # path = f'{folder}/live/{domain}'
+    # os.makedirs(path)
+
+    # with open(f'{path}/privkey.pem', 'wt', encoding='utf-8') as f:
+    #   f.write(self._exports[name]['Key'])
+    # with open(f'{path}/cert.pem', 'wt', encoding='utf-8') as f:
+    #   f.write(self._exports[name]['Cert'])
+    # with open(f'{path}/chain.pem', 'wt', encoding='utf-8') as f:
+    #   f.write(self._exports[name]['Chain'])
+
+    import json
+    Logger.info(json.dumps(self._exports))
+    Logger.info(self._exports[name]['Conf'])
+
+    path = f'{folder}/renewal'
+    os.makedirs(path)
+    with open(f'{path}/{domain}.conf', 'wt', encoding='utf-8') as f:
+      f.write(self._exports[name]['Conf'])
+
+    arguments = [
+      'revoke',
+      '--cert-name', f'{domain}',
+      '--reason', 'cessationofoperation',
+      '--config-dir', folder,
+      '--work-dir', folder,
+      '--logs-dir', folder
+      ]
+
+    if Env['CertbotStaging']:
+      arguments.append('--test-cert')
+
+    certbot.main.main(arguments)
+
+    self.__delete_export(name)
+
   def __export_certificate(self, name):
-    certificate = self._certificates[name]
-    export = {}
-
     if name in ['Authority', 'Internal', 'External']:
-      export['Key'] = certificate['Key'].private_bytes(
-        encoding = serialization.Encoding.PEM,
-        format = serialization.PrivateFormat.TraditionalOpenSSL,
-        encryption_algorithm = serialization.NoEncryption()
-      ).decode('utf-8')
-
-      export['Cert'] = certificate['Cert'].public_bytes(
-        encoding = serialization.Encoding.PEM
-      ).decode('utf-8')
+      self._exports[name] = dict(
+        Key = self._certificates[name]['Key'].private_bytes(
+          encoding = serialization.Encoding.PEM,
+          format = serialization.PrivateFormat.TraditionalOpenSSL,
+          encryption_algorithm = serialization.NoEncryption()
+        ).decode('utf-8'),
+        Cert = self._certificates[name]['Cert'].public_bytes(
+          encoding = serialization.Encoding.PEM
+        ).decode('utf-8')
+      )
 
     elif name == 'DiffieHellman':
-      export['Params'] = certificate['Params'].parameter_bytes(
-        encoding = serialization.Encoding.PEM,
-        format = serialization.ParameterFormat.PKCS3
-      ).decode('utf-8')
+      self._exports[name] = dict(
+        Params = self._certificates[name]['Params'].parameter_bytes(
+          encoding = serialization.Encoding.PEM,
+          format = serialization.ParameterFormat.PKCS3
+        ).decode('utf-8')
+      )
 
     elif name == 'Public':
-      export = certificate
-
-    self._exports[name] = export
+      self._exports[name] = self._certificates[name]
 
   def __save_export(self, name):
     for export in self._exports[name].keys():
@@ -280,14 +347,25 @@ class CertificateAuthority:
         Overwrite = True
       )
 
+  def __delete_export(self, name):
+    for export in self._exports[name].keys():
+      parameter = f'{self._Path}/{name}/{export}'
+
+      Logger.info(f'Destroying certificate with parameter:{parameter}')
+      AwsSsm.delete_parameter(Name = parameter)
+
+    self._exports.pop(name)
+
   def __delete_exports(self):
     parameters = []
     for cert in self._exports.keys():
       for export in self._exports[cert].keys():
         parameters.append(f'{self._Path}/{cert}/{export}')
 
+    if not parameters: return
+
     Logger.info(f'Destroying certificates with parameters:{parameters}')
-    AwsSsm.delete_parameters(Names=parameters)
+    AwsSsm.delete_parameters(Names = parameters)
 
   def __export(self):
     Logger.info(f'Returning certificate:[{self._ResourceType}]')
