@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import os, logging, boto3, datetime, shutil
+import os, logging, boto3, datetime, shutil, tarfile
 
 from cryptography import x509
 from cryptography.x509.oid import NameOID
@@ -36,10 +36,12 @@ Env = dict(
   PublicDomain = os.environ['PublicDomain'],
   KeyAlias = os.environ['KeyAlias'],
   CertbotEmail = os.environ['CertbotEmail'],
-  CertbotStaging = os.environ['CertbotStaging']
+  CertbotStaging = os.environ['CertbotStaging'],
+  Bucket = os.environ['Bucket']
 )
 
 AwsSsm = boto3.client('ssm')
+AwsS3 = boto3.client('s3')
 
 class CertificateAuthority:
 
@@ -49,6 +51,9 @@ class CertificateAuthority:
     self._Path = event['ResourceProperties']['Path']
 
     self._publicDomain = f'{self._Name}.{Env["PublicDomain"]}'
+
+    self._workDir = f'/tmp/{self._Name}'
+    os.makedirs(self._workDir, exist_ok = True)
 
     self._certificates = {}
     self._exports = {}
@@ -81,6 +86,9 @@ class CertificateAuthority:
 
     elif self._ResourceType == 'Public':
       self.__revoke_certificate_public()
+
+    else:
+      self.__delete_export(self._ResourceType)
 
   def __get_exports(self):
     response = AwsSsm.get_parameters_by_path(
@@ -212,7 +220,7 @@ class CertificateAuthority:
     self._certificates[name] = dict(
       Params = dh.generate_parameters(
         generator = 2,
-        key_size = 1024,
+        key_size = 2048,
         backend = default_backend()
       )
     )
@@ -228,7 +236,7 @@ class CertificateAuthority:
 
     Logger.info(f'Generating public certificate with domains:{domains}')
 
-    folder = "/tmp/certbot"
+    folder = f'{self._workDir}/certbot'
 
     arguments = [
       'certonly',
@@ -254,17 +262,23 @@ class CertificateAuthority:
     with open(f'{path}/cert.pem', 'r') as f: certificate = f.read()
     with open(f'{path}/chain.pem', 'r') as f: chain = f.read()
 
-    path = f'{folder}/renewal'
-    with open(f'{path}/{domains[0]}.conf', 'r') as f: conf = f.read()
-
-    shutil.rmtree(folder)
-
     self._certificates[name] = dict(
       Key = private_key,
       Cert = certificate,
-      Chain = chain,
-      Conf = conf
+      Chain = chain
     )
+
+    filename = 'certbot'
+    with tarfile.open(f'{self._workDir}/{filename}.tgz', 'w:gz') as tar:
+      tar.add(folder, arcname = filename)
+
+    AwsS3.upload_file(
+      Filename = f'{self._workDir}/{filename}.tgz',
+      Bucket = Env['Bucket'],
+      Key = f'{self._Name}/{filename}.tgz'
+    )
+
+    shutil.rmtree(folder)
 
     self.__export_certificate(name)
     self.__save_export(name)
@@ -273,29 +287,22 @@ class CertificateAuthority:
     domain = self._publicDomain
     Logger.info(f'Revoking public certificate for domain:{domain}')
 
-    folder = "/tmp/certbot"
+    folder = f'{self._workDir}/certbot'
+    filename = 'certbot'
 
-    # path = f'{folder}/live/{domain}'
-    # os.makedirs(path)
+    AwsS3.download_file(
+      Bucket = Env['Bucket'],
+      Key = f'{self._Name}/{filename}.tgz',
+      Filename = f'{self._workDir}/{filename}.tgz'
+    )
 
-    # with open(f'{path}/privkey.pem', 'wt', encoding='utf-8') as f:
-    #   f.write(self._exports[name]['Key'])
-    # with open(f'{path}/cert.pem', 'wt', encoding='utf-8') as f:
-    #   f.write(self._exports[name]['Cert'])
-    # with open(f'{path}/chain.pem', 'wt', encoding='utf-8') as f:
-    #   f.write(self._exports[name]['Chain'])
-
-    import json
-    Logger.info(json.dumps(self._exports))
-    Logger.info(self._exports[name]['Conf'])
-
-    path = f'{folder}/renewal'
-    os.makedirs(path)
-    with open(f'{path}/{domain}.conf', 'wt', encoding='utf-8') as f:
-      f.write(self._exports[name]['Conf'])
+    with tarfile.open(f'{self._workDir}/{filename}.tgz', 'r') as tar:
+      tar.extractall(path = self._workDir)
 
     arguments = [
       'revoke',
+      '-n',
+      '--delete-after-revoke',
       '--cert-name', f'{domain}',
       '--reason', 'cessationofoperation',
       '--config-dir', folder,
@@ -307,6 +314,13 @@ class CertificateAuthority:
       arguments.append('--test-cert')
 
     certbot.main.main(arguments)
+
+    AwsS3.delete_object(
+      Bucket = Env['Bucket'],
+      Key = f'{self._Name}/{filename}.tgz'
+    )
+
+    shutil.rmtree(folder)
 
     self.__delete_export(name)
 
@@ -348,6 +362,9 @@ class CertificateAuthority:
       )
 
   def __delete_export(self, name):
+    if not self._exports.get(name):
+      return
+
     for export in self._exports[name].keys():
       parameter = f'{self._Path}/{name}/{export}'
 
