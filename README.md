@@ -1,2 +1,1 @@
-# aws-serverless-private-ca
-Serverless Private CA for AWS
+# DemOS :: Certificate Authority
