@@ -13,88 +13,139 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import os, logging, boto3, datetime
+import os, logging, boto3, datetime, shutil, tarfile
 
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import rsa, dh
 
-import certbot.main, shutil
+import certbot.main
 
 Logger = logging.getLogger()
 if os.environ.get('LOG_LEVEL', 'INFO') == 'DEBUG':
   Logger.setLevel(logging.DEBUG)
-else: # Workaround: certbot aggro logs
+else: # Workaround: certbot aggro DEBUG logs
+  Logger.setLevel(logging.INFO)
   logging.disable(logging.DEBUG)
 
 Env = dict(
-  KeyAlias = os.environ.get('KeyAlias')
+  Issuer = os.environ['Issuer'],
+  PrivateDomain = os.environ['PrivateDomain'],
+  PublicDomain = os.environ['PublicDomain'],
+  KeyAlias = os.environ['KeyAlias'],
+  CertbotEmail = os.environ['CertbotEmail'],
+  CertbotStaging = os.environ['CertbotStaging'],
+  Bucket = os.environ['Bucket']
 )
 
 AwsSsm = boto3.client('ssm')
+AwsS3 = boto3.client('s3')
 
 class CertificateAuthority:
 
   def __init__(self, event):
     self._ResourceType = event['ResourceType'].split('::Certificate')[1]
+    self._Name = event['ResourceProperties']['Name']
     self._Path = event['ResourceProperties']['Path']
 
-    self._Issuer = event['ResourceProperties'].get('Issuer')
-    self._PrivateDomain = event['ResourceProperties'].get('PrivateDomain')
-    self._PublicDomain = event['ResourceProperties'].get('PublicDomain')
+    self._publicDomain = f'{self._Name}.{Env["PublicDomain"]}'
+
+    self._workDir = f'/tmp/{self._Name}'
+    os.makedirs(self._workDir, exist_ok = True)
 
     self._certificates = {}
     self._exports = {}
 
-  def get_certificate(self):
-    self.__get_exports()
+    self._package = dict(
+      Bucket = Env['Bucket'],
+      Key = f'{self._Name}/certificates.tgz',
+      Url = f's3://{Env["Bucket"]}/{self._Name}/certificates.tgz'
+    )
 
-    if self._exports.get(self._ResourceType) is not None:
-      return self.__export()
-
-    if self._ResourceType != 'Public':
-      self.__make_certificate_authority()
-
-      self.__make_certificate_private(
-        name = 'Internal',
-        domains = [self._PrivateDomain, f'*.{self._PrivateDomain}']
-      )
-
-      self.__make_certificate_private(
-        name = 'External',
-        domains = [self._PublicDomain, f'*.{self._PublicDomain}']
-      )
-
+  def get(self):
+    if self._ResourceType != 'Package':
+      return self.__get_certificate()
     else:
-      self.__make_certificate_public(
-        domains = [self._PublicDomain, f'*.{self._PublicDomain}']
-      )
-
-    return self.__export()
+      return self.__get_package()
 
   def destroy(self):
-    if self._ResourceType != 'Authority':
-      return
+    if self._ResourceType != 'Package':
+      self.__destroy_certificate()
+    else:
+      self.__destroy_package()
 
-    if self.__get_exports():
+  def __get_certificate(self):
+    self.__fetch_exports()
+
+    if self._exports.get(self._ResourceType):
+      return self.__return_export()
+
+    if self._ResourceType == 'Authority':
+      self.__make_certificate_authority()
+      self.__make_certificate_private(name = 'Internal')
+      self.__make_certificate_private(name = 'External')
+
+    elif self._ResourceType == 'DiffieHellman':
+      self.__make_certificate_dhparams()
+
+    elif self._ResourceType == 'Public':
+      self.__make_certificate_public()
+
+    return self.__return_export()
+
+  def __get_package(self):
+    if not self.__check_package():
+      self.__fetch_exports()
+      self.__save_package()
+
+    return self._package
+
+  def __destroy_certificate(self):
+    self.__fetch_exports()
+
+    if self._ResourceType == 'Authority':
       self.__delete_exports()
 
-  def __get_exports(self):
+    elif self._ResourceType == 'Public':
+      self.__revoke_certificate_public()
+
+    else:
+      self.__delete_export(self._ResourceType)
+
+  def __destroy_package(self):
+    if self.__check_package():
+      AwsS3.delete_object(
+        Bucket = self._package['Bucket'],
+        Key = self._package['Key']
+      )
+
+  def __fetch_exports(self):
     response = AwsSsm.get_parameters_by_path(
       Path = self._Path,
       Recursive = True,
       WithDecryption = True
     )
 
-    if not len(response.get('Parameters', [])):
+    if not response.get('Parameters'):
       Logger.info(f'No exported certificates were found')
       return False
 
-    Logger.info(f'Found ({len(response["Parameters"])}) exported certificates')
+    parameters = response['Parameters']
 
-    for parameter in response['Parameters']:
+    while response.get('NextToken'):
+      response = AwsSsm.get_parameters_by_path(
+        Path = self._Path,
+        Recursive = True,
+        WithDecryption = True,
+        NextToken = response['NextToken']
+      )
+      parameters += response['Parameters']
+
+    Logger.info(f'Found ({len(parameters)}) exported certificates')
+
+    for parameter in parameters:
       cert = parameter['Name'].split('/')[-2]
       export = parameter['Name'].split('/')[-1]
 
@@ -104,6 +155,15 @@ class CertificateAuthority:
       self._exports[cert][export] = parameter['Value']
 
     return True
+
+  def __check_package(self):
+    response = AwsS3.list_objects_v2(
+      Bucket = self._package['Bucket'],
+      Prefix = self._package['Key'],
+      MaxKeys = 1
+    )
+
+    return True if response.get('Contents') else False
 
   def __make_certificate_authority(self, name='Authority'):
     Logger.info('Generating Certificate Authority')
@@ -115,8 +175,8 @@ class CertificateAuthority:
     )
 
     subject = issuer = x509.Name([
-      x509.NameAttribute(NameOID.ORGANIZATION_NAME, self._Issuer),
-      x509.NameAttribute(NameOID.COMMON_NAME, self._PublicDomain)
+      x509.NameAttribute(NameOID.ORGANIZATION_NAME, Env['Issuer']),
+      x509.NameAttribute(NameOID.COMMON_NAME, self._publicDomain)
     ])
 
     certificate = x509.CertificateBuilder().subject_name(
@@ -144,7 +204,12 @@ class CertificateAuthority:
     self.__export_certificate(name)
     self.__save_export(name)
 
-  def __make_certificate_private(self, name, domains=[]):
+  def __make_certificate_private(self, name):
+    if name == 'External':
+      domains = [self._publicDomain, f'*.{self._publicDomain}']
+    else:
+      domains = [Env['PrivateDomain'], f'*.{Env["PrivateDomain"]}']
+
     Logger.info(f'Generating private cert:[{name}] with domains:{domains}')
 
     private_key = rsa.generate_private_key(
@@ -189,27 +254,53 @@ class CertificateAuthority:
     self.__export_certificate(name)
     self.__save_export(name)
 
-  def __make_certificate_public(self, name='Public', domains=[]):
+  def __make_certificate_dhparams(self, name='DiffieHellman'):
+    Logger.info('Generating Diffie-Hellman Parameters')
+
+    self._certificates[name] = dict(
+      Params = dh.generate_parameters(
+        generator = 2,
+        key_size = 2048,
+        backend = default_backend()
+      )
+    )
+
+    self.__export_certificate(name)
+    self.__save_export(name)
+
+  def __make_certificate_public(self, name='Public'):
+    domains = [
+      self._publicDomain,
+      f'*.{self._publicDomain}'
+    ]
+
     Logger.info(f'Generating public certificate with domains:{domains}')
 
-    folder = "/tmp/certbot"
+    folder = f'{self._workDir}/certbot'
 
-    certbot.main.main(['certonly', '--dns-route53', '-q', '-n', '--agree-tos',
+    arguments = [
+      'certonly',
+      '--dns-route53',
+      '-q',
+      '-n',
+      '--agree-tos',
       '-d', f'{",".join(domains)}',
-      '--email', f'alerts@{domains[0]}',
+      '--email', Env['CertbotEmail'],
       '--dns-route53-propagation-seconds', '30',
       '--config-dir', folder,
       '--work-dir', folder,
       '--logs-dir', folder
-    ])
+    ]
+
+    if Env['CertbotStaging']:
+      arguments.append('--test-cert')
+
+    certbot.main.main(arguments)
 
     path = f'{folder}/live/{domains[0]}'
-
-    with open(f'{path}/privkey.pem', 'r') as file: private_key = file.read()
-    with open(f'{path}/cert.pem', 'r') as file: certificate = file.read()
-    with open(f'{path}/chain.pem', 'r') as file: chain = file.read()
-
-    shutil.rmtree(path)
+    with open(f'{path}/privkey.pem', 'r') as f: private_key = f.read()
+    with open(f'{path}/cert.pem', 'r') as f: certificate = f.read()
+    with open(f'{path}/chain.pem', 'r') as f: chain = f.read()
 
     self._certificates[name] = dict(
       Key = private_key,
@@ -217,13 +308,23 @@ class CertificateAuthority:
       Chain = chain
     )
 
+    filename = 'certbot'
+    with tarfile.open(f'{self._workDir}/{filename}.tgz', 'w:gz') as tar:
+      tar.add(folder, arcname = filename)
+
+    AwsS3.upload_file(
+      Filename = f'{self._workDir}/{filename}.tgz',
+      Bucket = Env['Bucket'],
+      Key = f'{self._Name}/{filename}.tgz'
+    )
+
+    shutil.rmtree(folder)
+
     self.__export_certificate(name)
     self.__save_export(name)
 
   def __export_certificate(self, name):
-    if name == 'Public':
-      self._exports[name] = self._certificates[name]
-    else:
+    if name in ['Authority', 'Internal', 'External']:
       self._exports[name] = dict(
         Key = self._certificates[name]['Key'].private_bytes(
           encoding = serialization.Encoding.PEM,
@@ -234,6 +335,17 @@ class CertificateAuthority:
           encoding = serialization.Encoding.PEM
         ).decode('utf-8')
       )
+
+    elif name == 'DiffieHellman':
+      self._exports[name] = dict(
+        Params = self._certificates[name]['Params'].parameter_bytes(
+          encoding = serialization.Encoding.PEM,
+          format = serialization.ParameterFormat.PKCS3
+        ).decode('utf-8')
+      )
+
+    elif name == 'Public':
+      self._exports[name] = self._certificates[name]
 
   def __save_export(self, name):
     for export in self._exports[name].keys():
@@ -248,16 +360,7 @@ class CertificateAuthority:
         Overwrite = True
       )
 
-  def __delete_exports(self):
-    parameters = []
-    for cert in self._exports.keys():
-      for export in self._exports[cert].keys():
-        parameters.append(f'{self._Path}/{cert}/{export}')
-
-    Logger.info(f'Destroying certificates with parameters:{parameters}')
-    AwsSsm.delete_parameters(Names=parameters)
-
-  def __export(self):
+  def __return_export(self):
     Logger.info(f'Returning certificate:[{self._ResourceType}]')
 
     if self._ResourceType == 'Authority':
@@ -273,3 +376,92 @@ class CertificateAuthority:
 
     else:
       return self._exports.get(self._ResourceType)
+
+  def __save_package(self):
+    folderName = 'certificates'
+    folder = f'{self._workDir}/{folderName}'
+    tarFile = f'{folder}.tgz'
+
+    for cert in self._exports:
+      os.makedirs(f'{folder}/{cert}')
+      for export in self._exports[cert]:
+        exportFile = f'{folder}/{cert}/{export.lower()}.pem'
+        print(
+          self._exports[cert][export],
+          file = open(exportFile, 'w', encoding = 'utf-8')
+        )
+
+    with tarfile.open(tarFile, 'w:gz') as tar:
+      tar.add(folder, arcname = folderName)
+
+    AwsS3.upload_file(
+      Filename = tarFile,
+      Bucket = self._package['Bucket'],
+      Key = self._package['Key']
+    )
+
+    shutil.rmtree(folder)
+
+  def __revoke_certificate_public(self, name='Public'):
+    domain = self._publicDomain
+    Logger.info(f'Revoking public certificate for domain:{domain}')
+
+    folder = f'{self._workDir}/certbot'
+    filename = 'certbot'
+
+    AwsS3.download_file(
+      Bucket = Env['Bucket'],
+      Key = f'{self._Name}/{filename}.tgz',
+      Filename = f'{self._workDir}/{filename}.tgz'
+    )
+
+    with tarfile.open(f'{self._workDir}/{filename}.tgz', 'r') as tar:
+      tar.extractall(path = self._workDir)
+
+    arguments = [
+      'revoke',
+      '-n',
+      '--delete-after-revoke',
+      '--cert-name', f'{domain}',
+      '--reason', 'cessationofoperation',
+      '--config-dir', folder,
+      '--work-dir', folder,
+      '--logs-dir', folder
+      ]
+
+    if Env['CertbotStaging']:
+      arguments.append('--test-cert')
+
+    certbot.main.main(arguments)
+
+    AwsS3.delete_object(
+      Bucket = Env['Bucket'],
+      Key = f'{self._Name}/{filename}.tgz'
+    )
+
+    shutil.rmtree(folder)
+
+    self.__delete_export(name)
+
+  def __delete_export(self, name):
+    if not self._exports.get(name):
+      return
+
+    for export in self._exports[name].keys():
+      parameter = f'{self._Path}/{name}/{export}'
+
+      Logger.info(f'Destroying certificate with parameter:{parameter}')
+      AwsSsm.delete_parameter(Name = parameter)
+
+    self._exports.pop(name)
+
+  def __delete_exports(self):
+    parameters = []
+    for cert in self._exports.keys():
+      for export in self._exports[cert].keys():
+        parameters.append(f'{self._Path}/{cert}/{export}')
+
+    if not parameters: return
+
+    Logger.info(f'Destroying certificates with parameters:{parameters}')
+    AwsSsm.delete_parameters(Names = parameters)
