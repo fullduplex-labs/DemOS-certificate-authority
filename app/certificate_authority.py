@@ -58,11 +58,29 @@ class CertificateAuthority:
     self._certificates = {}
     self._exports = {}
 
-    self.__get_exports()
+    self._package = dict(
+      Bucket = Env['Bucket'],
+      Key = f'{self._Name}/certificates.tgz',
+      Url = f's3://{Env["Bucket"]}/{self._Name}/certificates.tgz'
+    )
 
-  def get_certificate(self):
+  def get(self):
+    if self._ResourceType != 'Package':
+      return self.__get_certificate()
+    else:
+      return self.__get_package()
+
+  def destroy(self):
+    if self._ResourceType != 'Package':
+      self.__destroy_certificate()
+    else:
+      self.__destroy_package()
+
+  def __get_certificate(self):
+    self.__fetch_exports()
+
     if self._exports.get(self._ResourceType):
-      return self.__export()
+      return self.__return_export()
 
     if self._ResourceType == 'Authority':
       self.__make_certificate_authority()
@@ -75,12 +93,18 @@ class CertificateAuthority:
     elif self._ResourceType == 'Public':
       self.__make_certificate_public()
 
-    else:
-      raise Exception(f'Missing certificate: {self._ResourceType}')
+    return self.__return_export()
 
-    return self.__export()
+  def __get_package(self):
+    if not self.__check_package():
+      self.__fetch_exports()
+      self.__save_package()
 
-  def destroy(self):
+    return self._package
+
+  def __destroy_certificate(self):
+    self.__fetch_exports()
+
     if self._ResourceType == 'Authority':
       self.__delete_exports()
 
@@ -90,14 +114,21 @@ class CertificateAuthority:
     else:
       self.__delete_export(self._ResourceType)
 
-  def __get_exports(self):
+  def __destroy_package(self):
+    if self.__check_package():
+      AwsS3.delete_object(
+        Bucket = self._package['Bucket'],
+        Key = self._package['Key']
+      )
+
+  def __fetch_exports(self):
     response = AwsSsm.get_parameters_by_path(
       Path = self._Path,
       Recursive = True,
       WithDecryption = True
     )
 
-    if not len(response.get('Parameters', [])):
+    if not response.get('Parameters'):
       Logger.info(f'No exported certificates were found')
       return False
 
@@ -124,6 +155,15 @@ class CertificateAuthority:
       self._exports[cert][export] = parameter['Value']
 
     return True
+
+  def __check_package(self):
+    response = AwsS3.list_objects_v2(
+      Bucket = self._package['Bucket'],
+      Prefix = self._package['Key'],
+      MaxKeys = 1
+    )
+
+    return True if response.get('Contents') else False
 
   def __make_certificate_authority(self, name='Authority'):
     Logger.info('Generating Certificate Authority')
@@ -283,6 +323,85 @@ class CertificateAuthority:
     self.__export_certificate(name)
     self.__save_export(name)
 
+  def __export_certificate(self, name):
+    if name in ['Authority', 'Internal', 'External']:
+      self._exports[name] = dict(
+        Key = self._certificates[name]['Key'].private_bytes(
+          encoding = serialization.Encoding.PEM,
+          format = serialization.PrivateFormat.TraditionalOpenSSL,
+          encryption_algorithm = serialization.NoEncryption()
+        ).decode('utf-8'),
+        Cert = self._certificates[name]['Cert'].public_bytes(
+          encoding = serialization.Encoding.PEM
+        ).decode('utf-8')
+      )
+
+    elif name == 'DiffieHellman':
+      self._exports[name] = dict(
+        Params = self._certificates[name]['Params'].parameter_bytes(
+          encoding = serialization.Encoding.PEM,
+          format = serialization.ParameterFormat.PKCS3
+        ).decode('utf-8')
+      )
+
+    elif name == 'Public':
+      self._exports[name] = self._certificates[name]
+
+  def __save_export(self, name):
+    for export in self._exports[name].keys():
+      parameter = f'{self._Path}/{name}/{export}'
+
+      Logger.info(f'Saving certificate with parameter:[{parameter}]')
+      AwsSsm.put_parameter(
+        Name = f'{self._Path}/{name}/{export}',
+        Value = self._exports[name][export],
+        Type = 'SecureString',
+        KeyId = Env['KeyAlias'],
+        Overwrite = True
+      )
+
+  def __return_export(self):
+    Logger.info(f'Returning certificate:[{self._ResourceType}]')
+
+    if self._ResourceType == 'Authority':
+      return dict(
+        Cert = self._exports['Authority']['Cert']
+      )
+
+    elif self._ResourceType == 'Public':
+      return dict(
+        Key = self._exports['Public']['Key'],
+        Cert = self._exports['Public']['Cert']
+      )
+
+    else:
+      return self._exports.get(self._ResourceType)
+
+  def __save_package(self):
+    folderName = 'certificates'
+    folder = f'{self._workDir}/{folderName}'
+    tarFile = f'{folder}.tgz'
+
+    for cert in self._exports:
+      os.makedirs(f'{folder}/{cert}')
+      for export in self._exports[cert]:
+        exportFile = f'{folder}/{cert}/{export.lower()}.pem'
+        print(
+          self._exports[cert][export],
+          file = open(exportFile, 'w', encoding = 'utf-8')
+        )
+
+    with tarfile.open(tarFile, 'w:gz') as tar:
+      tar.add(folder, arcname = folderName)
+
+    AwsS3.upload_file(
+      Filename = tarFile,
+      Bucket = self._package['Bucket'],
+      Key = self._package['Key']
+    )
+
+    shutil.rmtree(folder)
+
   def __revoke_certificate_public(self, name='Public'):
     domain = self._publicDomain
     Logger.info(f'Revoking public certificate for domain:{domain}')
@@ -324,43 +443,6 @@ class CertificateAuthority:
 
     self.__delete_export(name)
 
-  def __export_certificate(self, name):
-    if name in ['Authority', 'Internal', 'External']:
-      self._exports[name] = dict(
-        Key = self._certificates[name]['Key'].private_bytes(
-          encoding = serialization.Encoding.PEM,
-          format = serialization.PrivateFormat.TraditionalOpenSSL,
-          encryption_algorithm = serialization.NoEncryption()
-        ).decode('utf-8'),
-        Cert = self._certificates[name]['Cert'].public_bytes(
-          encoding = serialization.Encoding.PEM
-        ).decode('utf-8')
-      )
-
-    elif name == 'DiffieHellman':
-      self._exports[name] = dict(
-        Params = self._certificates[name]['Params'].parameter_bytes(
-          encoding = serialization.Encoding.PEM,
-          format = serialization.ParameterFormat.PKCS3
-        ).decode('utf-8')
-      )
-
-    elif name == 'Public':
-      self._exports[name] = self._certificates[name]
-
-  def __save_export(self, name):
-    for export in self._exports[name].keys():
-      parameter = f'{self._Path}/{name}/{export}'
-
-      Logger.info(f'Saving certificate with parameter:[{parameter}]')
-      AwsSsm.put_parameter(
-        Name = f'{self._Path}/{name}/{export}',
-        Value = self._exports[name][export],
-        Type = 'SecureString',
-        KeyId = Env['KeyAlias'],
-        Overwrite = True
-      )
-
   def __delete_export(self, name):
     if not self._exports.get(name):
       return
@@ -383,20 +465,3 @@ class CertificateAuthority:
 
     Logger.info(f'Destroying certificates with parameters:{parameters}')
     AwsSsm.delete_parameters(Names = parameters)
-
-  def __export(self):
-    Logger.info(f'Returning certificate:[{self._ResourceType}]')
-
-    if self._ResourceType == 'Authority':
-      return dict(
-        Cert = self._exports['Authority']['Cert']
-      )
-
-    elif self._ResourceType == 'Public':
-      return dict(
-        Key = self._exports['Public']['Key'],
-        Cert = self._exports['Public']['Cert']
-      )
-
-    else:
-      return self._exports.get(self._ResourceType)

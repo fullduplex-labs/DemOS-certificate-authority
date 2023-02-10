@@ -22,6 +22,7 @@ Logger = logging.getLogger()
 if os.environ.get('LOG_LEVEL', 'INFO') == 'DEBUG':
   Logger.setLevel(logging.DEBUG)
 else:
+  Logger.setLevel(logging.INFO)
   logging.disable(logging.DEBUG)
 
 SupportedResourceTypes = [
@@ -29,7 +30,8 @@ SupportedResourceTypes = [
   'Custom::CertificateInternal',
   'Custom::CertificateExternal',
   'Custom::CertificateDiffieHellman',
-  'Custom::CertificatePublic'
+  'Custom::CertificatePublic',
+  'Custom::CertificatePackage'
 ]
 
 def handler(event, context):
@@ -41,12 +43,14 @@ def handler(event, context):
 
     cfnResponse = CloudFormationResponse(event, context)
     ca = CertificateAuthority(event)
+
     responseData = None
 
     if event['RequestType'] in ['Create', 'Update']:
-      responseData = ca.get_certificate()
+      responseData = ca.get()
     elif event['RequestType'] == 'Delete':
       ca.destroy()
+
     else:
       raise Exception(f'Unsupported RequestType: {event["RequestType"]}')
 
