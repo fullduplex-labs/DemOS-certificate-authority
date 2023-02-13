@@ -26,7 +26,8 @@ import certbot.main
 Logger = logging.getLogger()
 if os.environ.get('LOG_LEVEL', 'INFO') == 'DEBUG':
   Logger.setLevel(logging.DEBUG)
-else: # Workaround: certbot aggro DEBUG logs
+else:
+  # Workaround: certbot aggro DEBUG logs
   Logger.setLevel(logging.INFO)
   logging.disable(logging.DEBUG)
 
@@ -58,9 +59,11 @@ class CertificateAuthority:
     self._certificates = {}
     self._exports = {}
 
+    self._packageUid = 1000
     self._package = dict(
       Bucket = Env['Bucket'],
       Key = f'{self._Name}/certificates.tgz',
+      Arn = f'arn:aws:s3:::{Env["Bucket"]}/{self._Name}/certificates.tgz',
       Url = f's3://{Env["Bucket"]}/{self._Name}/certificates.tgz'
     )
 
@@ -383,16 +386,20 @@ class CertificateAuthority:
     tarFile = f'{folder}.tgz'
 
     for cert in self._exports:
-      os.makedirs(f'{folder}/{cert}')
+      os.makedirs(f'{folder}/{cert}'.lower())
       for export in self._exports[cert]:
-        exportFile = f'{folder}/{cert}/{export.lower()}.pem'
+        exportFile = f'{folder}/{cert}/{export}.pem'.lower()
         print(
           self._exports[cert][export],
           file = open(exportFile, 'w', encoding = 'utf-8')
         )
 
+    def set_tar_options(tarinfo):
+      tarinfo.uid = tarinfo.gid = self._packageUid
+      return tarinfo
+
     with tarfile.open(tarFile, 'w:gz') as tar:
-      tar.add(folder, arcname = folderName)
+      tar.add(folder, arcname=folderName, filter=set_tar_options)
 
     AwsS3.upload_file(
       Filename = tarFile,
