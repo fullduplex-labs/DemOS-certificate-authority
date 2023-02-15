@@ -31,6 +31,7 @@ SupportedResourceTypes = [
   'Custom::CertificateExternal',
   'Custom::CertificateDiffieHellman',
   'Custom::CertificatePublic',
+  'Custom::CertificateSSH',
   'Custom::CertificatePackage',
   'Custom::CertificateVpnGateway'
 ]
