@@ -31,7 +31,8 @@ SupportedResourceTypes = [
   'Custom::CertificateExternal',
   'Custom::CertificateDiffieHellman',
   'Custom::CertificatePublic',
-  'Custom::CertificatePackage'
+  'Custom::CertificatePackage',
+  'Custom::CertificateVpnGateway'
 ]
 
 def handler(event, context):
@@ -57,5 +58,5 @@ def handler(event, context):
     cfnResponse.send(status='SUCCESS', data=responseData)
 
   except Exception as e:
-    Logger.error(e)
+    Logger.exception(e)
     cfnResponse.send(status='FAILED', reason=str(e))
