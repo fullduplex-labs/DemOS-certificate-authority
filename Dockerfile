@@ -34,7 +34,7 @@ mkdir -p /app
 pip install --target /app awslambdaric
 #
 # Install Additional Dependencies
-pip install --target /app boto3 cryptography certbot-dns-route53
+pip install --target /app boto3 cryptography certbot-dns-route53 jinja2
 EOF
 
 ARG LAMBDA_RIE
@@ -47,7 +47,8 @@ COPY --from=build-image /app /app
 ARG DEBIAN_FRONTEND
 RUN bash <<EOF
 apt-get update
-apt-get install -y --no-install-recommends python3 python3-pip
+apt-get install -y --no-install-recommends \
+  python3 python3-pip openvpn
 rm -rf /var/lib/apt/lists/*
 EOF
 
