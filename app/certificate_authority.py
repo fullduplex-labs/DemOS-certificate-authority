@@ -36,9 +36,9 @@ else:
 Env = dict(
   Namespace = os.environ['Namespace'],
   Project = os.environ['Project'],
+  Domain = os.environ['Domain'],
   PrivateDomain = os.environ['PrivateDomain'],
-  PublicDomain = os.environ['PublicDomain'],
-  KeyAlias = os.environ['KeyAlias'],
+  KeyAlias = os.environ.get('KeyAlias', 'alias/aws/ssm'),
   CertbotEmail = os.environ['CertbotEmail'],
   CertbotStaging = os.environ['CertbotStaging'],
   Bucket = os.environ['Bucket'],
@@ -57,10 +57,14 @@ class CertificateAuthority:
     self._ResourceType = event['ResourceType'].split('::Certificate')[1]
     self._Name = event['ResourceProperties']['Name']
     self._Label = event['ResourceProperties']['Label']
-    self._Path = event['ResourceProperties']['Path']
+
+    self._path = (
+      f'/{Env["Namespace"]}/{Env["Project"]}/{self._Name}'
+      '/Certificates'
+    )
 
     self._issuer = f'{Env["Namespace"]}-{Env["Project"]}'
-    self._publicDomain = f'{self._Name}.{Env["PublicDomain"]}'
+    self._publicDomain = f'{self._Name}.{AwsRegion}.{Env["Domain"]}'
 
     self._workDir = f'/tmp/{self._Name}'
     os.makedirs(self._workDir, exist_ok = True)
@@ -151,7 +155,6 @@ class CertificateAuthority:
 
     elif self._ResourceType == 'VpnGateway':
       self.__delete_profile_vpn()
-      self.__delete_export(self._ResourceType)
 
     else:
       self.__delete_export(self._ResourceType)
@@ -165,7 +168,7 @@ class CertificateAuthority:
 
   def __fetch_exports(self):
     response = AwsSsm.get_parameters_by_path(
-      Path = self._Path,
+      Path = self._path,
       Recursive = True,
       WithDecryption = True
     )
@@ -178,7 +181,7 @@ class CertificateAuthority:
 
     while response.get('NextToken'):
       response = AwsSsm.get_parameters_by_path(
-        Path = self._Path,
+        Path = self._path,
         Recursive = True,
         WithDecryption = True,
         NextToken = response['NextToken']
@@ -256,10 +259,16 @@ class CertificateAuthority:
     self.__save_export(name)
 
   def __make_certificate_private(self, name):
-    if name == 'External':
-      domains = [self._publicDomain, f'*.{self._publicDomain}']
-    else:
+    if name == 'Internal':
       domains = [Env['PrivateDomain'], f'*.{Env["PrivateDomain"]}']
+    elif name == 'External':
+      domains = [
+        self._publicDomain,
+        f'*.{self._publicDomain}',
+        f'*.{Env["Domain"]}'
+      ]
+    else:
+      raise Exception(f'Invalid private certificate name: {name}')
 
     Logger.info(f'Generating private cert:[{name}] with domains:{domains}')
 
@@ -339,7 +348,8 @@ class CertificateAuthority:
   def __make_certificate_public(self, name='Public'):
     domains = [
       self._publicDomain,
-      f'*.{self._publicDomain}'
+      f'*.{self._publicDomain}',
+      f'*.{Env["PrivateDomain"]}'
     ]
 
     Logger.info(f'Generating public certificate with domains:{domains}')
@@ -454,11 +464,11 @@ class CertificateAuthority:
 
   def __save_export(self, name):
     for export in self._exports[name].keys():
-      parameter = f'{self._Path}/{name}/{export}'
+      parameter = f'{self._path}/{name}/{export}'
 
       Logger.info(f'Saving certificate with parameter:[{parameter}]')
       AwsSsm.put_parameter(
-        Name = f'{self._Path}/{name}/{export}',
+        Name = f'{self._path}/{name}/{export}',
         Value = self._exports[name][export],
         Type = 'SecureString',
         KeyId = Env['KeyAlias'],
@@ -545,14 +555,14 @@ class CertificateAuthority:
 
     shutil.rmtree(folder)
 
-  def __delete_keypair_ssh(self):
+  def __delete_keypair_ssh(self, name='SSH'):
     AwsEc2.delete_key_pair(
       KeyName = self._keyPair['Name']
     )
+    self.__delete_export(name)
 
   def __revoke_certificate_public(self, name='Public'):
-    domain = self._publicDomain
-    Logger.info(f'Revoking public certificate for domain:{domain}')
+    Logger.info(f'Revoking public certificate for domain:{self._publicDomain}')
 
     folder = f'{self._workDir}/certbot'
     filename = 'certbot'
@@ -570,7 +580,7 @@ class CertificateAuthority:
       'revoke',
       '-n',
       '--delete-after-revoke',
-      '--cert-name', f'{domain}',
+      '--cert-name', self._publicDomain,
       '--reason', 'cessationofoperation',
       '--config-dir', folder,
       '--work-dir', folder,
@@ -591,19 +601,21 @@ class CertificateAuthority:
 
     self.__delete_export(name)
 
-  def __delete_profile_vpn(self):
+  def __delete_profile_vpn(self, name='VpnGateway'):
     if self.__check_profile_vpn():
       AwsS3.delete_object(
         Bucket = self._vpnGateway['Bucket'],
         Key = self._vpnGateway['Key']
       )
 
+    self.__delete_export(name)
+
   def __delete_export(self, name):
     if not self._exports.get(name):
       return
 
     for export in self._exports[name].keys():
-      parameter = f'{self._Path}/{name}/{export}'
+      parameter = f'{self._path}/{name}/{export}'
 
       Logger.info(f'Destroying certificate with parameter:{parameter}')
       AwsSsm.delete_parameter(Name = parameter)
@@ -614,7 +626,7 @@ class CertificateAuthority:
     parameters = []
     for cert in self._exports.keys():
       for export in self._exports[cert].keys():
-        parameters.append(f'{self._Path}/{cert}/{export}')
+        parameters.append(f'{self._path}/{cert}/{export}')
 
     if not parameters: return
 

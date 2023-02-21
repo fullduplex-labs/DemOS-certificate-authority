@@ -15,7 +15,7 @@
 #
 import os, logging, json
 
-from aws_tools import CloudFormationResponse
+import aws_tools
 from certificate_authority import CertificateAuthority
 
 Logger = logging.getLogger()
@@ -43,11 +43,15 @@ def handler(event, context):
     if event.get('ResourceType') not in SupportedResourceTypes:
       raise Exception(f'Unsupported ResourceType: {event.get("ResourceType")}')
 
-    cfnResponse = CloudFormationResponse(event, context)
-    ca = CertificateAuthority(event)
+    if not set(['Name', 'Label']).issubset(event['ResourceProperties'].keys()):
+      stack = aws_tools.CloudFormationStack(event)
+      event['ResourceProperties']['Name'] = stack.name
+      event['ResourceProperties']['Label'] = stack.label
 
+    response = aws_tools.CloudFormationResponse(event, context)
     responseData = None
 
+    ca = CertificateAuthority(event)
     if event['RequestType'] in ['Create', 'Update']:
       responseData = ca.get()
     elif event['RequestType'] == 'Delete':
@@ -56,8 +60,8 @@ def handler(event, context):
     else:
       raise Exception(f'Unsupported RequestType: {event["RequestType"]}')
 
-    cfnResponse.send(status='SUCCESS', data=responseData)
+    response.send(status='SUCCESS', data=responseData)
 
   except Exception as e:
     Logger.exception(e)
-    cfnResponse.send(status='FAILED', reason=str(e))
+    response.send(status='FAILED', reason=str(e))

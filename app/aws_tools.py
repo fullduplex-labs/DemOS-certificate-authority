@@ -13,11 +13,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import os, logging, urllib3, json
+import os, logging, re, json
+import boto3
+import urllib3
 
 Logger = logging.getLogger()
-LogLevel = os.environ.get('LOG_LEVEL', 'INFO')
-Logger.setLevel(logging.DEBUG if LogLevel == 'DEBUG' else logging.INFO)
+if os.environ.get('LOG_LEVEL', 'INFO') == 'DEBUG':
+  Logger.setLevel(logging.DEBUG)
+else:
+  Logger.setLevel(logging.INFO)
+  logging.disable(logging.DEBUG)
+
+class CloudFormationStack:
+
+  def __init__(self, event):
+    stackId = event['StackId']
+
+    client = boto3.client('cloudformation')
+    response = client.describe_stacks(
+      StackName = stackId
+    )
+
+    stack = response['Stacks'][0]
+
+    self.name = re.sub(r'^.+-pp-', '', stack['StackName'])
+
+    stack['Tags'] = {k:v for t in stack['Tags'] for k,v in [t.values()]}
+
+    tag = 'aws:servicecatalog:provisionedProductArn'
+    self.label = stack['Tags'][tag].split('/')[1]
+
 
 class CloudFormationResponse:
 
@@ -38,7 +63,7 @@ class CloudFormationResponse:
     if physicalResourceId is None:
       physicalResourceId = self.event.get(
         'PhysicalResourceId',
-        self.event.get('ResourceProperties',{}).get('Path','NONE')
+        self.event.get('ResourceProperties',{}).get('Name','NONE')
       )
 
     body = dict(
