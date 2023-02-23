@@ -590,7 +590,10 @@ class CertificateAuthority:
     if Env['CertbotStaging']:
       arguments.append('--test-cert')
 
-    certbot.main.main(arguments)
+    try:
+      certbot.main.main(arguments)
+    except Exception as e:
+      Logger.error(str(e))
 
     AwsS3.delete_object(
       Bucket = Env['Bucket'],
