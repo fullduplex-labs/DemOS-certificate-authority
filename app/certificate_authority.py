@@ -480,7 +480,8 @@ class CertificateAuthority:
 
     if self._ResourceType == 'Authority':
       return dict(
-        Cert = self._exports['Authority']['Cert']
+        Cert = self._exports['Authority']['Cert'],
+        PackageArn = self._package['Arn']
       )
 
     elif self._ResourceType == 'SSH':
