@@ -111,7 +111,7 @@ class CertificateAuthority:
     self.__fetch_exports()
 
     if self._exports.get(self._ResourceType):
-      return self.__return_export()
+      return self.__return_export(name = self._ResourceType)
 
     if self._ResourceType == 'Authority':
       self.__make_certificate_authority()
@@ -128,11 +128,14 @@ class CertificateAuthority:
     elif self._ResourceType == 'Public':
       self.__make_certificate_public()
 
+    elif self._ResourceType == 'PublicKey':
+      return self.__return_export(name = 'Public')
+
     elif self._ResourceType == 'VpnGateway':
       self.__make_certificate_vpn()
       self.__save_profile_vpn()
 
-    return self.__return_export()
+    return self.__return_export(name = self._ResourceType)
 
   def __get_package(self):
     if not self.__check_package():
@@ -149,6 +152,9 @@ class CertificateAuthority:
 
     elif self._ResourceType == 'Public':
       self.__revoke_certificate_public()
+
+    elif self._ResourceType == 'PublicKey':
+      return
 
     elif self._ResourceType == 'SSH':
       self.__delete_keypair_ssh()
@@ -358,6 +364,8 @@ class CertificateAuthority:
 
     arguments = [
       'certonly',
+      '--key-type', 'rsa',
+      '--rsa-key-size', '2048',
       '--dns-route53',
       '-q',
       '-n',
@@ -475,31 +483,35 @@ class CertificateAuthority:
         Overwrite = True
       )
 
-  def __return_export(self):
+  def __return_export(self, name):
     Logger.info(f'Returning certificate:[{self._ResourceType}]')
 
-    if self._ResourceType == 'Authority':
+    if name == 'Authority':
       return dict(
         Cert = self._exports['Authority']['Cert'],
         PackageArn = self._package['Arn']
       )
 
-    elif self._ResourceType == 'SSH':
+    elif name == 'SSH':
       return self._exports['SSH'] | self._keyPair
 
-    elif self._ResourceType == 'Public':
-      return dict(
-        Key = self._exports['Public']['Key'],
-        Cert = self._exports['Public']['Cert']
-      )
+    elif name == 'Public':
+      if self._ResourceType == 'PublicKey':
+        return dict(
+          Key = self._exports['Public']['Key']
+        )
+      else:
+        return dict(
+          Cert = self._exports['Public']['Cert']
+        )
 
-    elif self._ResourceType == 'VpnGateway':
+    elif name == 'VpnGateway':
       return dict(
         Profile = self._vpnGateway['Profile']
       )
 
     else:
-      return self._exports.get(self._ResourceType)
+      return self._exports.get(name)
 
   def __save_keypair_ssh(self):
     AwsEc2.import_key_pair(
