@@ -40,10 +40,13 @@ Env = dict(
   PrivateDomain = os.environ['PrivateDomain'],
   KeyAlias = os.environ.get('KeyAlias', 'alias/aws/ssm'),
   CertbotEmail = os.environ['CertbotEmail'],
-  CertbotStaging = os.environ['CertbotStaging'],
+  CertbotStaging = False if os.environ['CertbotStaging'] == 'false' else True,
   Bucket = os.environ['Bucket'],
   BucketVpnGateway = os.environ['BucketVpnGateway']
 )
+
+import json
+Logger.info(json.dumps(Env))
 
 AwsSsm = boto3.client('ssm')
 AwsS3 = boto3.client('s3')
@@ -378,7 +381,8 @@ class CertificateAuthority:
       '--logs-dir', folder
     ]
 
-    if Env['CertbotStaging']:
+    if Env['CertbotStaging'] is True:
+      Logger.info('Using certbot staging environment')
       arguments.append('--test-cert')
 
     certbot.main.main(arguments)
