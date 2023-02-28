@@ -75,10 +75,6 @@ class CertificateAuthority:
     self._certificates = {}
     self._exports = {}
 
-    self._keyPair = dict(
-      Name = f'{Env["Namespace"]}-{Env["Project"]}-{self._Name}'.lower()
-    )
-
     self._packageUid = 1000
     self._package = dict(
       Bucket = Env['Bucket'],
@@ -126,7 +122,6 @@ class CertificateAuthority:
 
     elif self._ResourceType == 'SSH':
       self.__make_certificate_ssh()
-      self.__save_keypair_ssh()
 
     elif self._ResourceType == 'Public':
       self.__make_certificate_public()
@@ -158,9 +153,6 @@ class CertificateAuthority:
 
     elif self._ResourceType == 'PublicKey':
       return
-
-    elif self._ResourceType == 'SSH':
-      self.__delete_keypair_ssh()
 
     elif self._ResourceType == 'VpnGateway':
       self.__delete_profile_vpn()
@@ -496,9 +488,6 @@ class CertificateAuthority:
         PackageArn = self._package['Arn']
       )
 
-    elif name == 'SSH':
-      return self._exports['SSH'] | self._keyPair
-
     elif name == 'Public':
       if self._ResourceType == 'PublicKey':
         return dict(
@@ -516,12 +505,6 @@ class CertificateAuthority:
 
     else:
       return self._exports.get(name)
-
-  def __save_keypair_ssh(self):
-    AwsEc2.import_key_pair(
-      KeyName = self._keyPair['Name'],
-      PublicKeyMaterial = self._exports['SSH']['Public']
-    )
 
   def __save_profile_vpn(self):
     template = jinja2.Environment(
@@ -571,12 +554,6 @@ class CertificateAuthority:
     )
 
     shutil.rmtree(folder)
-
-  def __delete_keypair_ssh(self, name='SSH'):
-    AwsEc2.delete_key_pair(
-      KeyName = self._keyPair['Name']
-    )
-    self.__delete_export(name)
 
   def __revoke_certificate_public(self, name='Public'):
     Logger.info(f'Revoking public certificate for domain:{self._publicDomain}')
