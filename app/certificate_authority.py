@@ -297,9 +297,12 @@ class CertificateAuthority:
     
     if len(domains):
       subjectAltNames = []
-      for domain in domains: subjectAltNames.append(x509.DNSName(domain))
-      subjectAltNames = x509.SubjectAlternativeName(subjectAltNames)
-      certificate.add_extension(subjectAltNames, critical=False)
+      for domain in domains:
+        subjectAltNames.append(x509.DNSName(domain))
+      certificate = certificate.add_extension(
+        x509.SubjectAlternativeName(subjectAltNames),
+        critical = False
+      )
 
     certificate = certificate.sign(
       self._certificates['Authority']['Key'],
