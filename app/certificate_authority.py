@@ -126,7 +126,7 @@ class CertificateAuthority:
     elif self._ResourceType == 'Public':
       self.__make_certificate_public()
 
-    elif self._ResourceType == 'PublicKey':
+    elif self._ResourceType in ['PublicChain', 'PublicKey']:
       return self.__return_export(name = 'Public')
 
     elif self._ResourceType == 'VpnGateway':
@@ -151,7 +151,7 @@ class CertificateAuthority:
     elif self._ResourceType == 'Public':
       self.__revoke_certificate_public()
 
-    elif self._ResourceType == 'PublicKey':
+    elif self._ResourceType in ['PublicChain', 'PublicKey']:
       return
 
     elif self._ResourceType == 'VpnGateway':
@@ -492,7 +492,11 @@ class CertificateAuthority:
       )
 
     elif name == 'Public':
-      if self._ResourceType == 'PublicKey':
+      if self._ResourceType == 'PublicChain':
+        return dict(
+          Chain = self._exports['Public']['Chain']
+        )
+      elif self._ResourceType == 'PublicKey':
         return dict(
           Key = self._exports['Public']['Key']
         )
