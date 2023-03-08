@@ -261,7 +261,11 @@ class CertificateAuthority:
 
   def __make_certificate_private(self, name):
     if name == 'Internal':
-      domains = [Env['PrivateDomain'], f'*.{Env["PrivateDomain"]}']
+      domains = [
+        Env['PrivateDomain'],
+        f'*.{Env["PrivateDomain"]}',
+        f'*.{Env["Domain"]}'
+      ]
     elif name == 'External':
       domains = [
         self._publicDomain,
